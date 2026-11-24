@@ -1,72 +1,123 @@
-"""Algoritmet: baseline nearest neighbour me backtracking."""
-from src.evaluator import build_trigger_index, tour_cost
+"""Algoritmet: baseline nearest neighbour me trigger-a, prerje dhe restart-e."""
+import random
+from src.evaluator import build_trigger_index
 
 
-def nearest_neighbour(inst, max_steps=1_000_000):
-    """
-    Nearest neighbour me trigger-a dhe backtracking.
-    Kthen listën e indekseve të harqeve (tur i plotë) ose None.
-    """
-    trig = build_trigger_index(inst)
+def _attempt(inst, trig, rev, mode, rng, max_steps):
+    """Një kërkim DFS. mode: 'cost' | 'degree' | 'random'. Kthen (path ose None, hapa)."""
     n = inst.n
-    steps = 0
-
+    arcs = inst.arcs
+    out_arcs = inst.out_arcs
     visited = [False] * n
     visited[0] = True
-    path = []        # harqet e zgjedhura deri tani
-    states = []      # states[k] = (last, total) para hapit k, për backtracking
-    # Për çdo nivel mbajmë listën e kandidatëve të renditur dhe pozicionin
-    cand_stack = []
+    path = []
+    state = {"steps": 0, "aborted": False}
 
-    def candidates(node, last):
-        """Harqet dalëse drejt nyjeve të pavizituara, renditur sipas kostos aktuale."""
-        out = []
-        for a in inst.out_arcs[node]:
-            v = inst.arcs[a][1]
-            if not visited[v] or (v == 0 and len(path) == n - 1):
-                c = last.get(a, inst.arcs[a][2])
-                out.append((c, a))
-        out.sort()
-        return out
+    def reach_ok(cur, remaining):
+        """Çdo nyje e pavizituar arrihet nga cur dhe arrin depon."""
+        if remaining == 0:
+            return True
+        seen = {cur}
+        stack = [cur]
+        while stack:
+            u = stack.pop()
+            for a in out_arcs[u]:
+                v = arcs[a][1]
+                if not visited[v] and v not in seen:
+                    seen.add(v)
+                    stack.append(v)
+        if len(seen) - 1 != remaining:
+            return False
+        seen2 = {0}
+        stack = [0]
+        cnt = 0
+        while stack:
+            v = stack.pop()
+            for u in rev[v]:
+                if not visited[u] and u not in seen2:
+                    seen2.add(u)
+                    cnt += 1
+                    stack.append(u)
+        return cnt == remaining
 
-    last = {}
-    cand_stack.append([candidates(0, last), 0])
-    states.append(dict(last))
-    node = 0
+    def dfs(cur, last, depth):
+        state["steps"] += 1
+        if state["steps"] > max_steps:
+            state["aborted"] = True
+            return False
+        if depth == n - 1:                       # nyja e fundit: mbyll drejt depos
+            for a in out_arcs[cur]:
+                if arcs[a][1] == 0:
+                    path.append(a)
+                    return True
+            return False
 
-    while cand_stack:
-        steps += 1
-        if steps > max_steps:
-            return None
-        cands, pos = cand_stack[-1]
-        if pos >= len(cands):
-            # Backtrack: hiq nivelin e fundit
-            cand_stack.pop()
-            states.pop()
-            if path:
-                a = path.pop()
-                v = inst.arcs[a][1]
-                if v != 0:
-                    visited[v] = False
-                node = inst.arcs[a][0]
-            continue
-        cand_stack[-1][1] += 1
-        c, a = cands[pos]
-        v = inst.arcs[a][1]
+        cands = []
+        for a in out_arcs[cur]:
+            v = arcs[a][1]
+            if not visited[v]:
+                c = last.get(a, arcs[a][2])
+                onward = sum(1 for b in out_arcs[v] if not visited[arcs[b][1]])
+                if mode == "cost":
+                    key = (c, onward)
+                elif mode == "degree":
+                    key = (onward, c)
+                else:
+                    key = (onward, rng.random())
+                cands.append((key, a))
+        cands.sort()
 
-        # Aplikojmë harkun a
-        last = dict(states[-1])
-        for target, new_cost in trig.get(a, ()):
-            last[target] = new_cost
-        path.append(a)
-        if v != 0:
+        for _, a in cands:
+            v = arcs[a][1]
             visited[v] = True
-        node = v
+            path.append(a)
+            if a in trig:
+                new_last = dict(last)
+                for target, new_cost in trig[a]:
+                    new_last[target] = new_cost
+            else:
+                new_last = last
+            if reach_ok(v, n - depth - 2) and dfs(v, new_last, depth + 1):
+                return True
+            visited[v] = False
+            path.pop()
+            if state["aborted"]:
+                return False
+        return False
 
-        if len(path) == n:
-            return path          # tur i plotë, mbyllur në 0
+    ok = dfs(0, {}, 0)
+    return (path if ok else None), state["steps"]
 
-        cand_stack.append([candidates(node, last), 0])
-        states.append(last)
 
-    return None
+def nearest_neighbour(inst, total_steps=150_000, trig=None, seed=0):
+    """
+    Baseline: DFS lakmitar me trigger-a aktivë, prerje dhe restart-e.
+    Kthen listën e harqeve ose None. Info te nearest_neighbour.last_info
+    = (hapa totalë, numri i përpjekjeve, status).
+    """
+    if trig is None:
+        trig = build_trigger_index(inst)
+    rev = [[] for _ in range(inst.n)]
+    for (u, v, _) in inst.arcs:
+        rev[v].append(u)
+
+    rng = random.Random(seed)
+    steps_used = 0
+    attempt = 0
+    result = None
+    while steps_used < total_steps:
+        if attempt == 0:
+            mode, limit = "cost", 20_000
+        elif attempt == 1:
+            mode, limit = "degree", 20_000
+        else:
+            mode, limit = "random", 5_000
+        result, steps = _attempt(inst, trig, rev, mode, rng, limit)
+        steps_used += steps
+        attempt += 1
+        if result is not None:
+            break
+
+    status = "ok" if result is not None else "kufi hapash"
+    nearest_neighbour.last_info = (steps_used, attempt, status)
+    return result
